@@ -568,11 +568,22 @@ class Component extends DCLogic {
         list[i] = saved;
       }
     } else {
-      saved = { id:'e'+Date.now(), ...f, title:f.title.trim(), at:new Date().toISOString() };
-      if (!saved.poster && f._autoPoster) saved.poster = f._autoPoster;
-      if (saved.rating==null && f._autoRating!=null) saved.rating = f._autoRating;
-      delete saved._autoPoster; delete saved._autoRating;
-      list.unshift(saved);
+      // never duplicate: same title+type already in the library → update that entry instead
+      const norm = s => (s||'').trim().toLowerCase();
+      const di = list.findIndex(x => !x.del && x.type===f.type && norm(x.title)===norm(f.title));
+      if (di >= 0) {
+        saved = {...list[di], ...f, title:f.title.trim(), at:new Date().toISOString()};
+        if (!saved.poster && f._autoPoster) saved.poster = f._autoPoster;
+        if (saved.rating==null && f._autoRating!=null) saved.rating = f._autoRating;
+        delete saved._autoPoster; delete saved._autoRating;
+        list[di] = saved;
+      } else {
+        saved = { id:'e'+Date.now(), ...f, title:f.title.trim(), at:new Date().toISOString() };
+        if (!saved.poster && f._autoPoster) saved.poster = f._autoPoster;
+        if (saved.rating==null && f._autoRating!=null) saved.rating = f._autoRating;
+        delete saved._autoPoster; delete saved._autoRating;
+        list.unshift(saved);
+      }
     }
     this.persist(list);
     this.setState({ sheetOpen:false, editId:null });
