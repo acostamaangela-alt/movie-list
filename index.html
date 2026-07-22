@@ -273,6 +273,7 @@
 class Component extends DCLogic {
   CLOUD_URL = 'https://ukkqclrpvauqdwwjcuhf.supabase.co';
   CLOUD_KEY = 'sb_publishable_kpr9En-LQisAFFY7SiLRug_airsRfhz';
+  TMDB_KEY = 'd16941bbe13fb40e28e95ba46de5e112';
   LIB_ID = 'ali-angela';
 
   state = {
@@ -372,11 +373,66 @@ class Component extends DCLogic {
     if (this.cloudOn()) { clearTimeout(this._save); this._save = setTimeout(() => this.cloudSave(entries), 400); }
   }
 
+  tmdbOn() { return !!this.TMDB_KEY; }
+
+  async tmdbSearch(title, type, year) {
+    if (!this.tmdbOn()) return null;
+    try {
+      const kind = type==='Series' ? 'tv' : 'movie';
+      let u = 'https://api.themoviedb.org/3/search/'+kind+'?api_key='+this.TMDB_KEY+'&query='+encodeURIComponent(title);
+      if (year) u += (kind==='tv'?'&first_air_date_year=':'&year=')+year;
+      const r = await fetch(u); const j = await r.json();
+      const hit = (j.results||[])[0];
+      if (!hit) return null;
+      const date = hit.release_date || hit.first_air_date || '';
+      return { poster: hit.poster_path ? 'https://image.tmdb.org/t/p/w500'+hit.poster_path : null, year: date ? date.slice(0,4) : '', title: hit.title || hit.name || title };
+    } catch(e) { return null; }
+  }
+
+  autoLookup(title) {
+    clearTimeout(this._lookup);
+    if (!this.tmdbOn() || !title || title.trim().length < 2) return;
+    this._lookup = setTimeout(async () => {
+      const cur = this.state.form.title;
+      if (!cur || cur.trim() !== title.trim()) return;
+      const asType = this.state.form.type;
+      let matched = asType;
+      let hit = await this.tmdbSearch(title, asType);
+      if (!hit) { const other = asType==='Series'?'Film':'Series'; hit = await this.tmdbSearch(title, other); if (hit) matched = other; }
+      if (!hit || this.state.form.title.trim() !== title.trim()) return;
+      this.setState(s => ({ form: { ...s.form, type: matched, year: s.form.year || hit.year || '', _autoPoster: hit.poster || '' } }));
+    }, 600);
+  }
+
   async fetchPoster(title, year, type) {
+    // Prefer TMDB when configured
+    if (this.tmdbOn()) {
+      const hit = await this.tmdbSearch(title, type, year);
+      if (hit && hit.poster) return hit.poster;
+      const alt = await this.tmdbSearch(title, type==='Series'?'Film':'Series', year);
+      if (alt && alt.poster) return alt.poster;
+    }
+    // Apple iTunes artwork first — real posters for films & TV, no key needed
+    try {
+      const media = type==='Series' ? 'tvShow' : 'movie';
+      const u = 'https://itunes.apple.com/search?term='+encodeURIComponent(title)+'&media='+media+'&limit=8';
+      const r = await fetch(u);
+      const j = await r.json();
+      let res = (j && j.results) || [];
+      if (year) {
+        const y = String(year);
+        const exact = res.filter(x => (x.releaseDate||'').slice(0,4)===y);
+        if (exact.length) res = exact;
+      }
+      const hit = res[0];
+      if (hit && hit.artworkUrl100) {
+        return hit.artworkUrl100.replace(/\/\d+x\d+bb?\.(jpg|png)/, '/600x600bb.$1');
+      }
+    } catch(e) {}
+    // fallback: Wikipedia lead image
     try {
       const kind = type==='Series' ? 'television series' : 'film';
-      const terms = title + (year ? ' '+year : '') + ' ' + kind;
-      const q = encodeURIComponent(terms);
+      const q = encodeURIComponent(title + (year ? ' '+year : '') + ' ' + kind);
       const url = 'https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch='+q+'&gsrlimit=1&prop=pageimages&piprop=thumbnail&pithumbsize=500&pilicense=any&format=json&origin=*';
       const r = await fetch(url);
       const j = await r.json();
@@ -433,6 +489,8 @@ class Component extends DCLogic {
       }
     } else {
       saved = { id:'e'+Date.now(), ...f, title:f.title.trim() };
+      if (!saved.poster && f._autoPoster) saved.poster = f._autoPoster;
+      delete saved._autoPoster;
       list.unshift(saved);
     }
     this.persist(list);
@@ -539,7 +597,7 @@ class Component extends DCLogic {
       combinedPreview: this.fmt((Number(f.ali)+Number(f.angela))/2),
       sheetAli: this.catArr(Number(f.ali), i => this.setF('ali', i)),
       sheetAng: this.catArr(Number(f.angela), i => this.setF('angela', i)),
-      onTitle: e => this.setF('title', e.target.value),
+      onTitle: e => { const v = e.target.value; this.setF('title', v); this.autoLookup(v); },
       onYear: e => this.setF('year', e.target.value.replace(/[^0-9]/g,'').slice(0,4)),
       onVibe: e => this.setF('vibe', e.target.value),
       onAliRev: e => this.setF('aliReview', e.target.value),
