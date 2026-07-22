@@ -123,6 +123,11 @@
               <span style="font-family:'DM Mono';font-weight:500;font-size:8.5px;color:#5c6b63;">/5</span>
             </div>
           </sc-if>
+          <sc-if value="{{ c.hasRating }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;top:7px;left:7px;display:flex;align-items:center;gap:4px;background:#cf4433;border:1.5px solid #21403b;border-radius:100px;padding:4px 8px;box-shadow:1px 1px 0 #21403b;">
+              <span style="font-family:'Anton';font-size:13px;line-height:1;color:#f4ecd8;">{{ c.rating }}%</span>
+            </div>
+          </sc-if>
           <sc-if value="{{ c.showRate }}" hint-placeholder-val="{{ false }}">
             <div style="position:absolute;inset:0;background:linear-gradient(transparent 40%,rgba(33,64,59,0.72));display:flex;align-items:flex-end;justify-content:center;padding:12px;">
               <span style="font-family:'DM Mono';font-weight:500;font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;background:#d99b34;color:#21403b;border:1.5px solid #21403b;border-radius:100px;padding:7px 14px;">Rate it →</span>
@@ -132,6 +137,12 @@
         <div style="padding:9px 11px 11px;">
           <div style="font-family:'DM Mono',monospace;font-size:8.5px;letter-spacing:0.1em;text-transform:uppercase;color:#5c6b63;">{{ c.type }} · {{ c.year }}</div>
           <div style="margin-top:3px;font-family:'DM Sans';font-weight:800;font-size:14.5px;line-height:1.1;letter-spacing:-0.01em;">{{ c.title }}</div>
+          <sc-if value="{{ c.hasRating }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:8px;display:flex;align-items:center;gap:6px;">
+              <span style="font-family:'DM Mono';font-size:8.5px;letter-spacing:0.06em;text-transform:uppercase;color:#cf4433;font-weight:500;">Critics {{ c.rating }}%</span>
+              <span style="flex:1;height:5px;border-radius:100px;background:#e0d6bd;overflow:hidden;border:1px solid #cbbfa4;"><span style="display:block;height:100%;width:{{ c.rating }}%;background:#cf4433;"></span></span>
+            </div>
+          </sc-if>
           <sc-if value="{{ c.showBadge }}" hint-placeholder-val="{{ true }}">
             <div style="margin-top:9px;display:flex;flex-direction:column;gap:5px;">
               <div style="display:flex;align-items:center;gap:6px;">
@@ -170,6 +181,9 @@
             <div style="flex:none;text-align:center;padding-left:4px;"><span style="font-family:'Anton';font-size:22px;color:#21403b;">{{ c.combined }}</span><span style="font-family:'DM Mono';font-size:8px;color:#5c6b63;display:block;">/5</span></div>
           </sc-if>
           <sc-if value="{{ c.showRate }}" hint-placeholder-val="{{ false }}">
+            <sc-if value="{{ c.hasRating }}" hint-placeholder-val="{{ false }}">
+              <div style="flex:none;text-align:center;padding-left:4px;"><span style="font-family:'Anton';font-size:20px;color:#cf4433;">{{ c.rating }}%</span><span style="font-family:'DM Mono';font-size:7.5px;color:#5c6b63;display:block;text-transform:uppercase;">critics</span></div>
+            </sc-if>
             <span style="flex:none;font-family:'DM Mono';font-size:9px;text-transform:uppercase;background:#d99b34;color:#21403b;border:1.5px solid #21403b;border-radius:100px;padding:6px 11px;">Rate</span>
           </sc-if>
         </div>
@@ -322,8 +336,10 @@ class Component extends DCLogic {
   componentDidMount() {
     let entries;
     try { entries = JSON.parse(localStorage.getItem('df_v5')); } catch(e){}
-    if (!Array.isArray(entries) || !entries.length) entries = this.seed();
-    this.setState({ entries }, () => this.ensurePosters(entries));
+    if (!Array.isArray(entries)) entries = null;
+    if ((!entries || !entries.length) && !this.cloudOn()) entries = this.seed();
+    entries = entries || [];
+    this.setState({ entries }, () => { this.ensurePosters(entries); this.ensureRatings(entries); });
     if (this.cloudOn()) this.cloudInit(entries);
   }
 
@@ -335,10 +351,25 @@ class Component extends DCLogic {
   async cloudLoad() {
     try {
       const r = await fetch(`${this.CLOUD_URL}/rest/v1/library?id=eq.${this.LIB_ID}&select=data,updated_at`, { headers:this.cloudHeaders() });
+      if (!r.ok) return null; // error: unknown state, never overwrite
       const j = await r.json();
-      return (Array.isArray(j) && j[0]) ? j[0] : null;
+      return (Array.isArray(j) && j[0]) ? j[0] : { missing:true };
     } catch(e) { return null; }
   }
+
+  // Union by entry id; newer `at` stamp wins per entry. A smaller/older
+  // library can never erase entries — deletes travel as tombstones (del:true).
+  mergeLibs(local, remote) {
+    const map = new Map(), order = [];
+    const add = e => {
+      if (!e || !e.id) return;
+      if (!map.has(e.id)) { map.set(e.id, e); order.push(e.id); }
+      else { const cur = map.get(e.id); if ((e.at||'') > (cur.at||'')) map.set(e.id, e); }
+    };
+    (local||[]).forEach(add); (remote||[]).forEach(add);
+    return order.map(id => map.get(id));
+  }
+  sameLib(a,b) { try { return JSON.stringify(a)===JSON.stringify(b); } catch(e){ return false; } }
 
   async cloudSave(entries) {
     const stamp = new Date().toISOString();
@@ -362,23 +393,28 @@ class Component extends DCLogic {
 
   async cloudInit(localEntries) {
     const row = await this.cloudLoad();
-    if (row && Array.isArray(row.data) && row.data.length) {
+    if (row && Array.isArray(row.data)) {
       this._remoteAt = row.updated_at;
       this._localAt = row.updated_at;
-      this.setState({ entries: row.data });
-      try { localStorage.setItem('df_v5', JSON.stringify(row.data)); } catch(e){}
-      this.ensurePosters(row.data);
-    } else {
-      this.cloudSave(localEntries);
+      const merged = this.mergeLibs(localEntries, row.data);
+      this.setState({ entries: merged });
+      try { localStorage.setItem('df_v5', JSON.stringify(merged)); } catch(e){}
+      if (!this.sameLib(merged, row.data)) this.cloudSave(merged);
+      this.ensurePosters(merged);
+      this.ensureRatings(merged);
+    } else if (row && row.missing && (localEntries||[]).length) {
+      this.cloudSave(localEntries); // first ever sync only
     }
     this._poll = setInterval(async () => {
       if (this._pending) return;
       const r = await this.cloudLoad();
-      if (r && r.updated_at && Array.isArray(r.data) && r.updated_at !== this._remoteAt && (!this._localAt || r.updated_at > this._localAt)) {
+      if (r && r.updated_at && Array.isArray(r.data) && r.updated_at !== this._remoteAt) {
         this._remoteAt = r.updated_at;
         this._localAt = r.updated_at;
-        this.setState({ entries: r.data });
-        try { localStorage.setItem('df_v5', JSON.stringify(r.data)); } catch(e){}
+        const merged = this.mergeLibs(this.state.entries||[], r.data);
+        this.setState({ entries: merged });
+        try { localStorage.setItem('df_v5', JSON.stringify(merged)); } catch(e){}
+        if (!this.sameLib(merged, r.data)) this.cloudSave(merged);
       }
     }, 5000);
   }
@@ -402,8 +438,21 @@ class Component extends DCLogic {
       const hit = (j.results||[])[0];
       if (!hit) return null;
       const date = hit.release_date || hit.first_air_date || '';
-      return { poster: hit.poster_path ? 'https://image.tmdb.org/t/p/w500'+hit.poster_path : null, year: date ? date.slice(0,4) : '', title: hit.title || hit.name || title };
+      const va = Number(hit.vote_average);
+      return { poster: hit.poster_path ? 'https://image.tmdb.org/t/p/w500'+hit.poster_path : null, year: date ? date.slice(0,4) : '', title: hit.title || hit.name || title, rating: (va>0 ? Math.round(va*10) : null) };
     } catch(e) { return null; }
+  }
+
+  async ensureRatings(list) {
+    for (let i=0;i<list.length;i++){
+      const e = list[i];
+      if (e.del || e.mode!=='watchlist' || e.rating!=null || e.ratingTried) continue;
+      let hit = await this.tmdbSearch(e.title, e.type, e.year);
+      if (!hit || hit.rating==null) { const other = e.type==='Series'?'Film':'Series'; hit = await this.tmdbSearch(e.title, other, e.year); }
+      const cur = (this.state.entries||[]).slice();
+      const idx = cur.findIndex(x => x.id===e.id);
+      if (idx>=0) { cur[idx] = {...cur[idx], rating: (hit&&hit.rating!=null)?hit.rating:null, ratingTried:true }; this.persist(cur); }
+    }
   }
 
   autoLookup(title) {
@@ -421,7 +470,8 @@ class Component extends DCLogic {
           .slice(0, 6)
           .map(x => {
             const date = x.release_date || x.first_air_date || '';
-            return { key: x.media_type+'-'+x.id, title: x.title || x.name || '', year: date ? date.slice(0,4) : '', type: x.media_type==='tv' ? 'Series' : 'Film', poster: x.poster_path ? 'https://image.tmdb.org/t/p/w185'+x.poster_path : '' };
+            const va = Number(x.vote_average);
+            return { key: x.media_type+'-'+x.id, title: x.title || x.name || '', year: date ? date.slice(0,4) : '', type: x.media_type==='tv' ? 'Series' : 'Film', poster: x.poster_path ? 'https://image.tmdb.org/t/p/w185'+x.poster_path : '', rating: (va>0 ? Math.round(va*10) : null) };
           });
         this.setState({ suggests: list });
       } catch(e) { this.setState({ suggests: [] }); }
@@ -429,7 +479,7 @@ class Component extends DCLogic {
   }
 
   pickSuggest = (s) => {
-    this.setState(st => ({ form: { ...st.form, title: s.title, year: s.year || st.form.year || '', type: s.type, _autoPoster: s.poster ? s.poster.replace('/w185','/w500') : '' }, suggests: [] }));
+    this.setState(st => ({ form: { ...st.form, title: s.title, year: s.year || st.form.year || '', type: s.type, _autoPoster: s.poster ? s.poster.replace('/w185','/w500') : '', _autoRating: (s.rating!=null ? s.rating : null) }, suggests: [] }));
   };
 
   async fetchPoster(title, year, type) {
@@ -473,7 +523,7 @@ class Component extends DCLogic {
 
   async ensurePosters(list) {
     for (let i=0;i<list.length;i++){
-      if (list[i].poster) continue;
+      if (list[i].del || list[i].poster) continue;
       const url = await this.fetchPoster(list[i].title, list[i].year, list[i].type);
       if (url) {
         const cur = (this.state.entries||[]).slice();
@@ -511,19 +561,23 @@ class Component extends DCLogic {
       const i = list.findIndex(x => x.id===this.state.editId);
       if (i>=0) {
         const titleChanged = list[i].title !== f.title.trim();
-        saved = {...list[i], ...f, title:f.title.trim()};
-        if (titleChanged) saved.poster = undefined;
+        saved = {...list[i], ...f, title:f.title.trim(), at:new Date().toISOString()};
+        if (titleChanged) { saved.poster = undefined; saved.rating = null; saved.ratingTried = false; }
+        if (f._autoRating!=null) saved.rating = f._autoRating;
+        delete saved._autoPoster; delete saved._autoRating;
         list[i] = saved;
       }
     } else {
-      saved = { id:'e'+Date.now(), ...f, title:f.title.trim() };
+      saved = { id:'e'+Date.now(), ...f, title:f.title.trim(), at:new Date().toISOString() };
       if (!saved.poster && f._autoPoster) saved.poster = f._autoPoster;
-      delete saved._autoPoster;
+      if (saved.rating==null && f._autoRating!=null) saved.rating = f._autoRating;
+      delete saved._autoPoster; delete saved._autoRating;
       list.unshift(saved);
     }
     this.persist(list);
     this.setState({ sheetOpen:false, editId:null });
     if (saved && !saved.poster) this.ensurePosters([{...saved}]);
+    if (saved && saved.mode==='watchlist' && saved.rating==null) this.ensureRatings([{...saved}]);
   };
 
   deleteEntry = () => {
@@ -534,13 +588,13 @@ class Component extends DCLogic {
       return;
     }
     clearTimeout(this._confirmT);
-    const list = (this.state.entries||[]).filter(x => x.id!==this.state.editId);
+    const list = (this.state.entries||[]).map(x => x.id===this.state.editId ? { id:x.id, del:true, at:new Date().toISOString() } : x);
     this.persist(list);
     this.setState({ sheetOpen:false, editId:null, confirmDel:false });
   };
 
   renderVals() {
-    const entries = this.state.entries || [];
+    const entries = (this.state.entries || []).filter(e => !e.del);
     const watched = entries.filter(e => e.mode==='watched');
     const watchlist = entries.filter(e => e.mode==='watchlist');
     const q = (this.state.query||'').trim().toLowerCase();
@@ -588,6 +642,7 @@ class Component extends DCLogic {
         aliCats:[], angCats:[], aliReview:'', angReview:'',
         showAliRev:false, showAngRev:false, ticketNo:this.ticketNo(e.id),
         showBadge:false, showRate:true, showVibe:false,
+        hasRating: e.rating!=null, rating: e.rating,
         onTap: () => this.openEdit(e,'watched'),
       }));
     }
